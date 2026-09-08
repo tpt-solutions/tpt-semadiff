@@ -1,0 +1,66 @@
+Design Spec 3: tpt-semadiff (Structural AST-Aware Diff Tool)
+Status: Proposed
+Target Release: Q3 2026
+Primary Language: Rust
+1. Executive Summary
+tpt-semadiff is a structural diff and merge tool that compares code based on its Abstract Syntax Tree (AST) rather than raw text lines. It is specifically designed to help human developers review, understand, and merge large blocks of AI-generated code, where line-based diffs are often misleading or noisy.
+2. Problem Statement
+When an LLM refactors a function, it might change indentation, rename variables, or reorder imports. A standard git diff will highlight every single changed line, making it impossible for a human reviewer to see the actual semantic change. Furthermore, AI often generates massive diffs that break standard merge tools.
+3. Goals & Non-Goals
+Goals:
+Parse source code into ASTs/CSTs (Concrete Syntax Trees) to preserve formatting where possible.
+Calculate the "Tree Edit Distance" to find the minimal set of semantic operations (Insert, Delete, Move, Update).
+Support all major languages via Tree-sitter.
+Integrate seamlessly with Git (git difftool).
+Non-Goals:
+Replacing the Git object database (it operates on working tree files).
+Auto-resolving complex 3-way merge conflicts without human intervention.
+4. Architecture
+
+[ file_a.py ] ──┐                 ┌── [ file_b.py ]
+                ▼                 ▼
+        ┌──────────────┐   ┌──────────────┐
+        │ Tree-sitter  │   │ Tree-sitter  │
+        │ (Python)     │   │ (Python)     │
+        └──────┬───────┘   └──────┬───────┘
+               │                  │
+               ▼                  ▼
+        ┌──────────────┐   ┌──────────────┐
+        │ CST / AST    │   │ CST / AST    │
+        │ Normalizer   │   │ Normalizer   │
+        │(Strip trivia)│   │(Strip trivia)│
+        └──────┬───────┘   └──────┬───────┘
+               │                  │
+               └────────┬─────────┘
+                        ▼
+               ┌──────────────────┐
+               │  Tree Diff Engine│
+               │ (Zhang-Shasha /  │
+               │  Chawathe Alg.)  │
+               └────────┬─────────┘
+                        ▼
+               ┌──────────────────┐
+               │  Semantic        │
+               │  Formatter (TUI) │
+               └──────────────────┘
+
+5. Key Components
+Tree-sitter Integration: Uses Tree-sitter grammars to parse code, ensuring structural understanding regardless of the language.
+CST Normalizer: Strips out "trivia" (whitespace, comments) temporarily for the diffing algorithm, but retains the mapping to the original CST to reconstruct the final output with original formatting intact.
+Tree Diff Engine: Implements a robust tree edit distance algorithm. Outputs semantic operations (e.g., UPDATE FunctionDeclaration -> UPDATE ParameterList).
+Semantic Formatter: Translates tree operations into a human-readable terminal UI (TUI) or standard unified diff format, grouped by semantic blocks.
+6. UX & Git Integration
+tpt-semadiff is designed to be a drop-in replacement for vimdiff or meld in Git configurations.
+Terminal Output Example:
+
+File: src/main.rs
+┌─ Function: calculate_metrics (Lines 40-85) ─────────────────────────┐
+│ [MOVED] Variable `total_sum` moved to Line 42                        │
+│ [UPDATE] Loop condition changed: `i < len` -> `i < data.len()`       │
+│ [INSERT] Added new block: `if metrics.is_empty() { return default; }`│
+└──────────────────────────────────────────────────────────────────────┘
+
+7. Advanced Features
+AI-Refactor Summarizer: Generates a natural language summary of the structural changes (e.g., "Extracted validation logic into a helper function").
+Ignore Formatting Flag: --ignore-formatting ensures that if an AI just reformats a file, tpt-semadiff reports zero changes.
+JSON Export: --out json exports the semantic diff, allowing CI/CD pipelines to enforce rules like "No AI-generated PR can modify more than 3 semantic functions without a human reviewer."
