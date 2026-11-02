@@ -32,11 +32,11 @@ jobs:
         run: cargo fmt --all -- --check
 
   msrv:
-    name: Build on minimum supported Rust (1.75)
+    name: Build on minimum supported Rust (1.90)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75
+      - uses: dtolnay/rust-toolchain@1.90
       - run: cargo build --workspace
 
   coverage:
