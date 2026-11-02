@@ -1,0 +1,20 @@
+[package]
+name = "tpt-semadiff-core"
+description = "Structural, AST-aware diffing engine behind tpt-semadiff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-go = "0.25"
+serde.workspace = true
+serde_json.workspace = true
+similar = "2"
+ureq = { version = "2", features = ["json"] }
