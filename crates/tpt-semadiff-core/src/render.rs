@@ -90,6 +90,57 @@ pub fn render_group(group: &Group, color_output: bool) -> String {
     out
 }
 
+/// GitHub-flavoured Markdown for one file, for pasting into a pull request comment: a
+/// heading, the change counts, then one bullet per function with its changes nested below.
+pub fn render_markdown(report: &Report) -> String {
+    let mut out = String::new();
+    if report.old_name == report.new_name {
+        let _ = writeln!(out, "### `{}`\n", report.new_name);
+    } else {
+        let _ = writeln!(out, "### `{}` → `{}`\n", report.old_name, report.new_name);
+    }
+    for line in &report.summaries {
+        let _ = writeln!(out, "- {line}");
+    }
+    if !report.summaries.is_empty() {
+        out.push('\n');
+    }
+    let c = report.counts;
+    let _ = writeln!(
+        out,
+        "**Changes:** {} inserted, {} deleted, {} moved, {} updated\n",
+        c.insert, c.delete, c.moved, c.update
+    );
+    if report.groups.is_empty() {
+        out.push_str("No semantic changes.\n");
+        return out;
+    }
+    for group in &report.groups {
+        let title = match &group.function {
+            Some(name) => format!("`{name}`"),
+            None => "Top level".to_owned(),
+        };
+        let _ = writeln!(
+            out,
+            "- {title} (lines {}-{})",
+            group.start_line, group.end_line
+        );
+        for change in &group.changes {
+            let line = change
+                .new_line
+                .or(change.old_line)
+                .unwrap_or(group.start_line);
+            let _ = writeln!(
+                out,
+                "  - **{}** line {line}: {}",
+                label(change.op),
+                change.description
+            );
+        }
+    }
+    out
+}
+
 /// Unified line diff of the two sources, as `diff -u` would print it.
 pub fn render_unified(old_name: &str, new_name: &str, old_src: &str, new_src: &str) -> String {
     similar::TextDiff::from_lines(old_src, new_src)
