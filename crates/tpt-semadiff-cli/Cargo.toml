@@ -28,7 +28,7 @@ ignore = "0.4"
 globset = "0.4"
 
 [dev-dependencies]
-jsonschema = "0.26"
+jsonschema = "0.60"
 
 # `cargo binstall tpt-semadiff-cli` downloads the release archive built by cargo-dist.
 [package.metadata.binstall]
