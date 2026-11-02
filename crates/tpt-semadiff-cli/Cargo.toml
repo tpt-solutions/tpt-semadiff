@@ -1,0 +1,18 @@
+[package]
+name = "tpt-semadiff-cli"
+description = "Command-line front end for tpt-semadiff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "semadiff"
+path = "src/main.rs"
+
+[dependencies]
+tpt-semadiff-core.workspace = true
+tpt-semadiff-tui.workspace = true
+clap.workspace = true
