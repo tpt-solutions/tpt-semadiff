@@ -42,6 +42,18 @@ fn language_is_chosen_from_the_extension() {
         SourceLang::from_path(Path::new("x.go")),
         Some(SourceLang::Go)
     );
+    for ext in ["ts", "mts", "cts"] {
+        let path = format!("x.{ext}");
+        assert_eq!(
+            SourceLang::from_path(Path::new(&path)),
+            Some(SourceLang::TypeScript),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        SourceLang::from_path(Path::new("x.tsx")),
+        Some(SourceLang::Tsx)
+    );
     assert_eq!(SourceLang::from_path(Path::new("x.txt")), None);
     assert_eq!(SourceLang::from_path(Path::new("Makefile")), None);
 }
@@ -64,6 +76,14 @@ fn reconstruct_reproduces_the_source_exactly() {
         (
             SourceLang::Go,
             "package main\n\n// Run it.\nfunc main() {\n\tx := 1 // one\n\t_ = x\n}\n",
+        ),
+        (
+            SourceLang::TypeScript,
+            "// top\ninterface P { x: number }\nfunction f(a: P): number {\n  /* block */ return a.x + 1;\n}\n",
+        ),
+        (
+            SourceLang::Tsx,
+            "// top\nconst View = (p: { n: number }) => <div>{p.n}</div>; // trailing\n",
         ),
     ];
     for (lang, src) in samples {
@@ -193,4 +213,49 @@ fn syntax_errors_are_reported_with_a_line_number() {
         Err(ParseError::Syntax { line }) => assert_eq!(line, 1),
         other => panic!("expected a syntax error, got {other:?}"),
     }
+}
+
+#[test]
+fn typescript_type_annotation_change_is_reported() {
+    let old = "function f(a: number): number { return a; }\n";
+    let new = "function f(a: string): number { return a; }\n";
+    let ops = ops_of(old, new, SourceLang::TypeScript, keep());
+    assert!(
+        ops.iter().any(|op| match op {
+            EditOp::Insert { kind, .. } | EditOp::Delete { kind, .. } => {
+                kind == "type_annotation"
+            }
+            _ => false,
+        }),
+        "{ops:?}"
+    );
+}
+
+#[test]
+fn typescript_only_syntax_parses_and_diffs() {
+    let old = "interface P { x: number }\nenum E { A, B }\nconst y = z as number;\n";
+    let new = "interface P { x: string }\nenum E { A, B }\nconst y = z as number;\n";
+    let ops = ops_of(old, new, SourceLang::TypeScript, keep());
+    assert!(
+        !ops.is_empty(),
+        "interface field type change must be reported"
+    );
+}
+
+#[test]
+fn tsx_parses_jsx_that_plain_typescript_rejects() {
+    let src = "const v = <div className=\"a\">{1}</div>;\n";
+    assert!(diff_files(src, src, SourceLang::Tsx, keep()).is_ok());
+    assert!(matches!(
+        diff_files(src, src, SourceLang::TypeScript, keep()),
+        Err(ParseError::Syntax { .. })
+    ));
+}
+
+#[test]
+fn typescript_comment_only_edit_follows_the_formatting_flag() {
+    let old = "function f(): number {\n  // old\n  return 1;\n}\n";
+    let new = "function f(): number {\n  // new\n  return 1;\n}\n";
+    assert!(!ops_of(old, new, SourceLang::TypeScript, keep()).is_empty());
+    assert!(ops_of(old, new, SourceLang::TypeScript, strip()).is_empty());
 }

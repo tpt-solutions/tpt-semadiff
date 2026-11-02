@@ -12,10 +12,23 @@ pub enum SourceLang {
     Rust,
     Python,
     JavaScript,
+    TypeScript,
+    /// TypeScript with JSX, which needs its own grammar.
+    Tsx,
     Go,
 }
 
 impl SourceLang {
+    /// Every language, in the order the docs list them.
+    pub const ALL: [SourceLang; 6] = [
+        Self::Rust,
+        Self::Python,
+        Self::JavaScript,
+        Self::TypeScript,
+        Self::Tsx,
+        Self::Go,
+    ];
+
     /// Picks a language from a file extension.
     pub fn from_path(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -23,6 +36,8 @@ impl SourceLang {
             "rs" => Some(Self::Rust),
             "py" => Some(Self::Python),
             "js" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
+            "ts" | "mts" | "cts" => Some(Self::TypeScript),
+            "tsx" => Some(Self::Tsx),
             "go" => Some(Self::Go),
             _ => None,
         }
@@ -33,6 +48,8 @@ impl SourceLang {
             Self::Rust => "rust",
             Self::Python => "python",
             Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
             Self::Go => "go",
         }
     }
@@ -42,6 +59,8 @@ impl SourceLang {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
         }
     }
@@ -51,7 +70,9 @@ impl SourceLang {
         match self {
             Self::Rust => &["function_item"],
             Self::Python => &["function_definition"],
-            Self::JavaScript => &["function_declaration", "method_definition"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["function_declaration", "method_definition"]
+            }
             Self::Go => &["function_declaration", "method_declaration"],
         }
     }
@@ -61,7 +82,7 @@ impl SourceLang {
         match self {
             Self::Rust => &["use_declaration"],
             Self::Python => &["import_statement", "import_from_statement"],
-            Self::JavaScript => &["import_statement"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => &["import_statement"],
             Self::Go => &["import_declaration", "import_spec"],
         }
     }
@@ -71,7 +92,9 @@ impl SourceLang {
         match self {
             Self::Rust => &["let_declaration"],
             Self::Python => &["assignment"],
-            Self::JavaScript => &["lexical_declaration", "variable_declaration"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["lexical_declaration", "variable_declaration"]
+            }
             Self::Go => &["short_var_declaration"],
         }
     }
