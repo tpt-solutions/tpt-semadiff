@@ -34,7 +34,7 @@ fn sorted_kinds(ops: &[EditOp]) -> (usize, usize, usize, usize) {
 fn zhang_shasha_distance_of_identical_trees_is_zero() {
     let (distance, map) = zhang_shasha::mapping(&base(), &base());
     assert_eq!(distance, 0);
-    assert_eq!(map.len(), base().node_count());
+    assert_eq!(map.pairs().count(), base().node_count());
 }
 
 #[test]

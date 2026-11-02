@@ -54,6 +54,34 @@ impl SourceLang {
         }
     }
 
+    /// Picks a language from its [`name`](Self::name), ignoring case.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|lang| lang.name().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// Picks a language from a `#!` line, such as `#!/usr/bin/env python3`.
+    pub fn from_shebang(line: &str) -> Option<Self> {
+        let rest = line.strip_prefix("#!")?;
+        let mut words = rest
+            .split_whitespace()
+            .map(|word| word.rsplit('/').next().unwrap_or(word));
+        let first = words.next()?;
+        // Through `env`, the interpreter follows any options, such as `-S`, and assignments.
+        let interpreter = if first == "env" {
+            words.find(|w| !w.starts_with('-') && !w.contains('='))?
+        } else {
+            first
+        };
+        let name = interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        match name {
+            "python" => Some(Self::Python),
+            "node" | "nodejs" => Some(Self::JavaScript),
+            _ => None,
+        }
+    }
+
     pub(crate) fn grammar(self) -> tree_sitter::Language {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
@@ -65,15 +93,28 @@ impl SourceLang {
         }
     }
 
-    /// Node kinds that introduce a named function or method.
+    /// Node kinds that introduce a function: named functions and methods, plus anonymous
+    /// ones such as closures, lambdas and arrow functions.
     pub fn function_kinds(self) -> &'static [&'static str] {
         match self {
-            Self::Rust => &["function_item"],
-            Self::Python => &["function_definition"],
-            Self::JavaScript | Self::TypeScript | Self::Tsx => {
-                &["function_declaration", "method_definition"]
-            }
-            Self::Go => &["function_declaration", "method_declaration"],
+            Self::Rust => &["function_item", "closure_expression"],
+            Self::Python => &["function_definition", "lambda"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => &[
+                "function_declaration",
+                "generator_function_declaration",
+                "method_definition",
+                "function_expression",
+                "arrow_function",
+            ],
+            Self::Go => &["function_declaration", "method_declaration", "func_literal"],
+        }
+    }
+
+    /// Node kinds of a function's body block, whose children are its statements.
+    pub fn body_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust | Self::Python | Self::Go => &["block"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => &["statement_block"],
         }
     }
 
@@ -152,6 +193,60 @@ fn convert_children(node: tree_sitter::Node, src: &[u8], out: &mut ArenaTree, pa
         }
         convert_children(child, src, out, id);
     }
+}
+
+/// Identifier kinds that can name a function or the binding it is assigned to.
+const NAME_KINDS: &[&str] = &[
+    "identifier",
+    "field_identifier",
+    "property_identifier",
+    "name",
+];
+
+/// Anonymous function kinds whose direct identifier children are parameters, not a name.
+/// JavaScript's `x => x` puts its single parameter directly under the node.
+const PARAMETER_ONLY_KINDS: &[&str] = &[
+    "arrow_function",
+    "closure_expression",
+    "lambda",
+    "func_literal",
+];
+
+/// Parents that bind their value to a name, such as `const f = <function>`.
+const BINDING_PARENTS: &[&str] = &[
+    "variable_declarator",
+    "let_declaration",
+    "short_var_declaration",
+    "assignment",
+    "assignment_expression",
+    "pair",
+];
+
+/// The name of a function node: its own name, else the name it is bound to
+/// (`const f = () => ...`, `f = lambda: ...`). `None` for a function with neither.
+///
+/// The binding lookup is a heuristic. It takes the last name before the function in the
+/// binding's left-hand side, which is the property for `obj.f = ...`.
+pub fn function_name<T: Tree>(tree: &T, node: NodeId) -> Option<&str> {
+    if !PARAMETER_ONLY_KINDS.contains(&tree.kind(node)) {
+        let own = tree
+            .children(node)
+            .iter()
+            .find(|&&c| NAME_KINDS.contains(&tree.kind(c)));
+        if let Some(&name) = own {
+            return tree.value(name);
+        }
+    }
+    let parent = tree.parent(node)?;
+    if !BINDING_PARENTS.contains(&tree.kind(parent)) {
+        return None;
+    }
+    let start = tree.span(node).start_byte;
+    tree.subtree(parent)
+        .into_iter()
+        .filter(|&n| NAME_KINDS.contains(&tree.kind(n)) && tree.span(n).end_byte <= start)
+        .last()
+        .and_then(|n| tree.value(n))
 }
 
 fn first_error(node: tree_sitter::Node) -> Option<tree_sitter::Node> {

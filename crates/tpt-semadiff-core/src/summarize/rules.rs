@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::diff::FileDiff;
 use crate::normalize::Normalized;
 use crate::ops::EditOp;
-use crate::parse::SourceLang;
+use crate::parse::{function_name, SourceLang};
 use crate::tree::{NodeId, Tree};
 
 /// Summarizes a diff as sentences. Returns one line per recognized refactoring, or a
@@ -136,22 +136,27 @@ fn extract_lines(diff: &FileDiff) -> Vec<String> {
     lines
 }
 
-/// Name and body statements (whitespace-collapsed text) of every function in a file.
+/// Name and body statements (whitespace-collapsed text) of every named function in a file.
 fn functions(file: &Normalized, lang: SourceLang) -> Vec<(String, Vec<String>)> {
     let tree = file.tree();
     tree.preorder()
         .into_iter()
         .filter(|&n| lang.function_kinds().contains(&tree.kind(n)))
-        .filter_map(|n| Some((function_name(file, n)?, body_statements(file, n))))
+        .filter_map(|n| {
+            Some((
+                function_name(tree, n)?.to_owned(),
+                body_statements(file, lang, n),
+            ))
+        })
         .collect()
 }
 
-fn body_statements(file: &Normalized, function: NodeId) -> Vec<String> {
+fn body_statements(file: &Normalized, lang: SourceLang, function: NodeId) -> Vec<String> {
     let tree = file.tree();
     let Some(&body) = tree
         .children(function)
         .iter()
-        .find(|&&c| tree.kind(c).contains("block"))
+        .find(|&&c| lang.body_kinds().contains(&tree.kind(c)))
     else {
         return Vec::new();
     };
@@ -162,8 +167,8 @@ fn body_statements(file: &Normalized, function: NodeId) -> Vec<String> {
         .collect()
 }
 
-/// `Inlined variable x`: a binding was removed and its right-hand side now appears
-/// verbatim, while the name no longer occurs anywhere.
+/// `Inlined variable x`: a binding was removed and its initializer now appears verbatim,
+/// while the name no longer occurs anywhere.
 fn inline_lines(diff: &FileDiff) -> Vec<String> {
     let (old, new) = (diff.old.tree(), diff.new.tree());
     let bindings = diff.lang.binding_kinds();
@@ -173,11 +178,22 @@ fn inline_lines(diff: &FileDiff) -> Vec<String> {
         let EditOp::Delete { node, .. } = op else {
             continue;
         };
-        if !bindings.contains(&old.kind(*node)) {
-            continue;
-        }
+        // Python wraps an assignment in an expression statement, so the deleted node can be
+        // the wrapper. Look one level down for the binding.
+        let binding = if bindings.contains(&old.kind(*node)) {
+            *node
+        } else {
+            let Some(&inner) = old
+                .children(*node)
+                .iter()
+                .find(|&&c| bindings.contains(&old.kind(c)))
+            else {
+                continue;
+            };
+            inner
+        };
         let Some(name) = old
-            .subtree(*node)
+            .subtree(binding)
             .into_iter()
             .find(|&n| old.kind(n).ends_with("identifier"))
             .and_then(|n| old.value(n))
@@ -185,10 +201,10 @@ fn inline_lines(diff: &FileDiff) -> Vec<String> {
         else {
             continue;
         };
-        let Some((_, rhs)) = diff.old.text(*node).split_once('=') else {
+        let Some(value) = initializer(old, binding) else {
             continue;
         };
-        let expr = collapse(rhs.trim().trim_end_matches(';'));
+        let expr = collapse(diff.old.text(value));
         if expr.is_empty() {
             continue;
         }
@@ -203,13 +219,27 @@ fn inline_lines(diff: &FileDiff) -> Vec<String> {
     lines
 }
 
-fn function_name(file: &Normalized, node: NodeId) -> Option<String> {
-    let tree = file.tree();
-    tree.children(node)
+/// The expression a binding assigns: the last named child of the binding, or of its
+/// declarator for `const x = ...`. `None` when there is no `=` or `:=` (a bare declaration).
+fn initializer<T: Tree>(tree: &T, binding: NodeId) -> Option<NodeId> {
+    let decl = tree
+        .children(binding)
         .iter()
-        .find(|&&c| tree.kind(c).ends_with("identifier"))
-        .and_then(|&c| tree.value(c))
-        .map(str::to_owned)
+        .copied()
+        .find(|&c| tree.kind(c) == "variable_declarator")
+        .unwrap_or(binding);
+    let assigns = tree
+        .children(decl)
+        .iter()
+        .any(|&c| !tree.is_named(c) && matches!(tree.kind(c), "=" | ":="));
+    if !assigns {
+        return None;
+    }
+    tree.children(decl)
+        .iter()
+        .rev()
+        .copied()
+        .find(|&c| tree.is_named(c))
 }
 
 fn collapse(text: &str) -> String {

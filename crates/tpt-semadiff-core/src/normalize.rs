@@ -48,6 +48,9 @@ impl Normalized {
     }
 
     /// The full concrete tree, including trivia.
+    ///
+    /// Library API. The CLI does not read this; it is kept so that tools can map a
+    /// normalized node back to the source, or rebuild the file byte for byte.
     pub fn cst(&self) -> &ArenaTree {
         &self.cst
     }
@@ -57,10 +60,15 @@ impl Normalized {
     }
 
     /// The concrete-tree node behind a normalized node.
+    ///
+    /// Library API. The CLI does not read this; see [`Normalized::cst`].
     pub fn origin(&self, node: NodeId) -> NodeId {
         self.origin[node]
     }
 
+    /// The source split into trivia and tokens, in order.
+    ///
+    /// Library API. The CLI does not read this; see [`Normalized::cst`].
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }
@@ -72,6 +80,8 @@ impl Normalized {
     }
 
     /// Rebuilds the original source from the segments. Always equals the input.
+    ///
+    /// Library API. The CLI does not read this; see [`Normalized::cst`].
     pub fn reconstruct(&self) -> String {
         let mut out = String::with_capacity(self.source.len());
         for segment in &self.segments {
@@ -98,12 +108,19 @@ pub fn normalize(
     let count = cst.node_count();
 
     // `drop[n]`: node `n` is removed from the diffed tree.
+    // `unwrap[n]`: node `n` is removed, but its children move up to its parent.
     // `in_trivia[n]`: node `n` or an ancestor is trivia, so its leaves become trivia segments.
     let mut drop = vec![false; count];
+    let mut unwrap = vec![false; count];
     let mut in_trivia = vec![false; count];
     for node in cst.preorder() {
-        let own = is_comment(cst.kind(node)) || (strip && is_docstring(&cst, node, lang));
+        let own = is_comment(cst.kind(node))
+            || (strip
+                && (is_docstring(&cst, node, lang)
+                    || is_trailing_comma(&cst, node)
+                    || is_redundant_paren(&cst, node)));
         drop[node] = strip && own;
+        unwrap[node] = strip && is_paren_wrapper(&cst, node);
         in_trivia[node] = own || cst.parent(node).is_some_and(|p| in_trivia[p]);
     }
 
@@ -114,7 +131,7 @@ pub fn normalize(
         cst.span(root),
     );
     let mut origin = vec![root];
-    copy_children(&cst, root, &mut tree, 0, &mut origin, &drop);
+    copy_children(&cst, root, &mut tree, 0, &mut origin, &drop, &unwrap);
 
     let mut leaves: Vec<NodeId> = cst
         .preorder()
@@ -157,9 +174,14 @@ fn copy_children(
     out_parent: NodeId,
     origin: &mut Vec<NodeId>,
     drop: &[bool],
+    unwrap: &[bool],
 ) {
     for &child in cst.children(node) {
         if drop[child] {
+            continue;
+        }
+        if unwrap[child] {
+            copy_children(cst, child, out, out_parent, origin, drop, unwrap);
             continue;
         }
         let id = out.add_child(
@@ -172,12 +194,74 @@ fn copy_children(
             out.mark_anonymous(id);
         }
         origin.push(child);
-        copy_children(cst, child, out, id, origin, drop);
+        copy_children(cst, child, out, id, origin, drop, unwrap);
     }
 }
 
 fn is_comment(kind: &str) -> bool {
     kind.contains("comment")
+}
+
+/// Node kinds whose children are a list of items separated by commas. A comma after the
+/// last item only changes the source text, so `--ignore-formatting` drops it there.
+/// Tuples are left out: in Python `(1,)` is a tuple and its comma is significant.
+const LIST_KINDS: &[&str] = &[
+    "arguments",
+    "argument_list",
+    "parameters",
+    "formal_parameters",
+    "parameter_list",
+    "lambda_parameters",
+    "array",
+    "array_expression",
+    "object",
+    "list",
+    "dictionary",
+    "set",
+    "array_pattern",
+    "object_pattern",
+    "initializer_list",
+    "field_initializer_list",
+    "field_declaration_list",
+    "declaration_list",
+    "enum_variant_list",
+    "literal_value",
+];
+
+/// An anonymous comma that ends a list: it follows an item and comes right before a closing
+/// bracket. A comma directly after another comma is kept, since it makes an array hole.
+fn is_trailing_comma(cst: &ArenaTree, node: NodeId) -> bool {
+    if cst.is_named(node) || cst.kind(node) != "," {
+        return false;
+    }
+    let Some(parent) = cst.parent(node) else {
+        return false;
+    };
+    if !LIST_KINDS.contains(&cst.kind(parent)) {
+        return false;
+    }
+    let siblings = cst.children(parent);
+    let Some(pos) = siblings.iter().position(|&c| c == node) else {
+        return false;
+    };
+    let follows_item = pos > 0 && cst.is_named(siblings[pos - 1]);
+    let closes = siblings
+        .get(pos + 1)
+        .is_some_and(|&next| !cst.is_named(next) && matches!(cst.kind(next), ")" | "]" | "}"));
+    follows_item && closes
+}
+
+/// A parenthesized expression, whose parentheses carry no meaning of their own. The tree
+/// keeps the expression inside, so `(a + b) * c` still differs from `a + b * c`.
+fn is_paren_wrapper(cst: &ArenaTree, node: NodeId) -> bool {
+    cst.kind(node) == "parenthesized_expression" && cst.parent(node).is_some()
+}
+
+/// The `(` or `)` token of a parenthesized expression that is being unwrapped.
+fn is_redundant_paren(cst: &ArenaTree, node: NodeId) -> bool {
+    !cst.is_named(node)
+        && matches!(cst.kind(node), "(" | ")")
+        && cst.parent(node).is_some_and(|p| is_paren_wrapper(cst, p))
 }
 
 /// A Python docstring: the first statement of a module or block, if it is a bare string.

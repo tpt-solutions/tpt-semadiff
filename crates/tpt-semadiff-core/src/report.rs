@@ -6,19 +6,11 @@ use serde::Serialize;
 use crate::diff::FileDiff;
 use crate::normalize::Normalized;
 use crate::ops::EditOp;
-use crate::parse::SourceLang;
+use crate::parse::{function_name, SourceLang};
 use crate::tree::{NodeId, Tree};
 
 /// Longest source snippet quoted in a description.
 const SNIPPET_CHARS: usize = 60;
-
-/// Names a function node can carry as a direct child.
-const NAME_KINDS: &[&str] = &[
-    "identifier",
-    "field_identifier",
-    "property_identifier",
-    "name",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,8 +52,13 @@ pub struct ChangeCounts {
     pub update: usize,
 }
 
+/// Version of the JSON shape, bumped when a field is removed or changes meaning. Adding
+/// an optional field does not bump it. See `docs/json-schema.md`.
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
+    pub schema_version: u32,
     pub old_name: String,
     pub new_name: String,
     pub language: &'static str,
@@ -71,6 +68,12 @@ pub struct Report {
     /// Optional natural-language summary lines, filled in by the caller.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<String>,
+    /// Where `summaries` came from, `rules` or `llm`. Absent when no summary was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_source: Option<&'static str>,
+    /// Why `--summary llm` used the rules instead, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_fallback: Option<String>,
 }
 
 /// A change together with the function it belongs to.
@@ -87,6 +90,7 @@ impl Report {
         engine: &'static str,
     ) -> Self {
         let mut report = Report {
+            schema_version: SCHEMA_VERSION,
             old_name: old_name.to_owned(),
             new_name: new_name.to_owned(),
             language: diff.lang.name(),
@@ -94,6 +98,8 @@ impl Report {
             counts: ChangeCounts::default(),
             groups: Vec::new(),
             summaries: Vec::new(),
+            summary_source: None,
+            summary_fallback: None,
         };
         for op in &diff.ops {
             // A moved punctuation or keyword token is a side effect of its parent's
@@ -199,7 +205,9 @@ fn place(diff: &FileDiff, op: &EditOp) -> Placed {
     }
 }
 
-/// The innermost function that contains `node`, counting `node` itself.
+/// The innermost named function that contains `node`, counting `node` itself. Anonymous
+/// functions are passed over, so a change inside a closure reports under its enclosing
+/// function.
 fn enclosing_function(
     file: &Normalized,
     node: NodeId,
@@ -209,15 +217,10 @@ fn enclosing_function(
     let mut cur = Some(node);
     while let Some(n) = cur {
         if lang.function_kinds().contains(&tree.kind(n)) {
-            let name = tree
-                .children(n)
-                .iter()
-                .find(|&&c| NAME_KINDS.contains(&tree.kind(c)))
-                .and_then(|&c| tree.value(c))
-                .unwrap_or("(anonymous)")
-                .to_owned();
-            let span = tree.span(n);
-            return Some((name, Some((span.start_line, span.end_line))));
+            if let Some(name) = function_name(tree, n) {
+                let span = tree.span(n);
+                return Some((name.to_owned(), Some((span.start_line, span.end_line))));
+            }
         }
         cur = tree.parent(n);
     }

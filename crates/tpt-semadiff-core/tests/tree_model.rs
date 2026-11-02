@@ -64,7 +64,7 @@ fn mapping_refuses_to_match_a_node_twice() {
     assert!(!m.link(0, 1), "old node 0 is already matched");
     assert!(!m.link(1, 0), "new node 0 is already matched");
     assert!(m.link(1, 1));
-    assert_eq!(m.len(), 2);
+    assert_eq!(m.pairs().count(), 2);
     assert_eq!(m.new_for(0), Some(0));
     assert_eq!(m.old_for(1), Some(1));
 }

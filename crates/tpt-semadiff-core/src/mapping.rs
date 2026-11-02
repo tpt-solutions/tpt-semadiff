@@ -44,12 +44,4 @@ impl Mapping {
             .enumerate()
             .filter_map(|(old, new)| new.map(|new| (old, new)))
     }
-
-    pub fn len(&self) -> usize {
-        self.pairs().count()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }

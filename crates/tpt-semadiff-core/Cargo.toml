@@ -1,6 +1,9 @@
 [package]
 name = "tpt-semadiff-core"
 description = "Structural, AST-aware diffing engine behind tpt-semadiff"
+readme = "README.md"
+keywords = ["diff", "ast", "tree-sitter", "semantic-diff", "parser"]
+categories = ["development-tools", "parser-implementations"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,4 +21,8 @@ tree-sitter-go = "0.25"
 serde.workspace = true
 serde_json.workspace = true
 similar = "2"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json"], optional = true }
+
+[features]
+# Off by default, so the offline build does not pull in an HTTP client.
+llm = ["dep:ureq"]

@@ -18,6 +18,8 @@ use super::rules;
 
 /// Model used when `SEMADIFF_LLM_MODEL` is not set.
 pub const DEFAULT_MODEL: &str = "claude-haiku-5-5";
+/// Response size used when `SEMADIFF_LLM_MAX_TOKENS` is not set.
+pub const DEFAULT_MAX_TOKENS: u32 = 512;
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const MAX_LINES: usize = 5;
@@ -48,10 +50,15 @@ pub trait LlmClient {
 pub struct AnthropicClient {
     api_key: String,
     model: String,
+    max_tokens: u32,
+    /// Replaces the built-in system prompt when set.
+    system: Option<String>,
 }
 
 impl AnthropicClient {
-    /// Reads `ANTHROPIC_API_KEY` (required) and `SEMADIFF_LLM_MODEL` (optional).
+    /// Reads `ANTHROPIC_API_KEY` (required) and the optional `SEMADIFF_LLM_MODEL`,
+    /// `SEMADIFF_LLM_MAX_TOKENS` (a positive integer) and `SEMADIFF_LLM_SYSTEM` (a
+    /// system prompt that replaces the built-in one). Invalid optional values are ignored.
     pub fn from_env() -> Option<Self> {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .ok()
@@ -60,15 +67,29 @@ impl AnthropicClient {
             .ok()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        Some(Self { api_key, model })
+        let max_tokens = env::var("SEMADIFF_LLM_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_TOKENS);
+        let system = env::var("SEMADIFF_LLM_SYSTEM")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        Some(Self {
+            api_key,
+            model,
+            max_tokens,
+            system,
+        })
     }
 }
 
 impl LlmClient for AnthropicClient {
     fn complete(&self, system: &str, prompt: &str) -> Result<String, LlmError> {
+        let system = self.system.as_deref().unwrap_or(system);
         let body = json!({
             "model": self.model,
-            "max_tokens": 512,
+            "max_tokens": self.max_tokens,
             "system": system,
             "messages": [{ "role": "user", "content": prompt }],
         });
@@ -93,32 +114,52 @@ pub enum Source {
     Rules,
 }
 
+impl Source {
+    /// The name shown in output: `llm` or `rules`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Llm => "llm",
+            Self::Rules => "rules",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     pub source: Source,
     pub lines: Vec<String>,
+    /// Why the LLM was not used, when one was asked for and the rules answered instead.
+    pub fallback: Option<String>,
 }
 
-/// Summarizes with `client` when given, otherwise (or on any failure) with the rules.
+/// Summarizes with `client` when given, otherwise (or on any failure) with the rules. A
+/// failure is recorded in [`Summary::fallback`].
 pub fn summarize_with_fallback(
     client: Option<&dyn LlmClient>,
     diff: &FileDiff,
     report: &Report,
 ) -> Summary {
-    if let Some(client) = client {
-        if let Ok(text) = client.complete(SYSTEM, &build_prompt(report)) {
-            let lines = parse_lines(&text);
-            if !lines.is_empty() {
-                return Summary {
-                    source: Source::Llm,
-                    lines,
-                };
+    let reason = match client {
+        None => "ANTHROPIC_API_KEY is not set".to_owned(),
+        Some(client) => match client.complete(SYSTEM, &build_prompt(report)) {
+            Err(err) => format!("API request failed: {err}"),
+            Ok(text) => {
+                let lines = parse_lines(&text);
+                if !lines.is_empty() {
+                    return Summary {
+                        source: Source::Llm,
+                        lines,
+                        fallback: None,
+                    };
+                }
+                "the model returned no summary lines".to_owned()
             }
-        }
-    }
+        },
+    };
     Summary {
         source: Source::Rules,
         lines: rules::summarize(diff),
+        fallback: Some(reason),
     }
 }
 
