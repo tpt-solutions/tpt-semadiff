@@ -21,7 +21,7 @@ tree-sitter-go = "0.25"
 serde.workspace = true
 serde_json.workspace = true
 similar = "2"
-ureq = { version = "2", features = ["json"], optional = true }
+ureq = { version = "3", features = ["json"], optional = true }
 
 [features]
 # Off by default, so the offline build does not pull in an HTTP client.

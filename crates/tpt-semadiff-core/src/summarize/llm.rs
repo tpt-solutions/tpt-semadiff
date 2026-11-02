@@ -93,13 +93,18 @@ impl LlmClient for AnthropicClient {
             "system": system,
             "messages": [{ "role": "user", "content": prompt }],
         });
-        let response = ureq::post(ENDPOINT)
-            .timeout(TIMEOUT)
-            .set("x-api-key", &self.api_key)
-            .set("anthropic-version", API_VERSION)
+        let mut response = ureq::post(ENDPOINT)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .config()
+            .timeout_global(Some(TIMEOUT))
+            .build()
             .send_json(body)
             .map_err(|e| LlmError(e.to_string()))?;
-        let value: serde_json::Value = response.into_json().map_err(|e| LlmError(e.to_string()))?;
+        let value: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .map_err(|e| LlmError(e.to_string()))?;
         value["content"][0]["text"]
             .as_str()
             .map(str::to_owned)
