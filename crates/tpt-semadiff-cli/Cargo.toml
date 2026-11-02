@@ -20,7 +20,7 @@ tpt-semadiff-core = { workspace = true, features = ["llm"] }
 tpt-semadiff-tui.workspace = true
 clap.workspace = true
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
