@@ -38,4 +38,20 @@ new file ─┘  (tree-sitter)  (trivia)   (matching)  └─                   
 - Some anonymous punctuation can appear as an insert and a delete when its parent was
   rematched. These are real token differences, but they are noisy.
 - Adding or removing an optional semicolon is a token change, and is reported.
-- Only the four grammars listed in the README are supported.
+- Only the six built-in grammars are supported: Rust, Python, JavaScript, TypeScript, TSX
+  and Go. `semadiff doctor` checks that each one loads.
+- For a file that is new on one side, the top-level box shows an update from an empty
+  string to the first line. The insert shows the real change; the update is a side effect of
+  matching an empty root node.
+
+## CLI (crate `tpt-semadiff-cli`)
+
+- `main.rs`: flags, subcommands, exit status and the CI gates.
+- `pipeline.rs`: one old/new pair becomes a report, or a fallback when it cannot be parsed.
+  Every input mode goes through it.
+- `dirs.rs`: directory mode. Pairs supported files by relative path.
+- `rev.rs`: revision mode. Asks git which files changed and reads both sides with `git show`.
+- `output.rs`: text, unified, JSON and Markdown renderers, including the `{"files": [...]}`
+  envelope.
+- `setup.rs`: `git-setup`. Reads and writes git config through `git config`.
+- `doctor.rs`: `doctor`.

@@ -58,7 +58,7 @@ Target release: Q3 2026. Tracking checklist — check items off as completed.
 
 ## Phase 8 — Git Integration
 - [x] Implement `git difftool`-compatible invocation interface (file pair args, exit codes)
-- [ ] Document/script git config setup for using tpt-semadiff as difftool/mergetool
+- [x] Document/script git config setup for using tpt-semadiff as difftool/mergetool
 - [x] Test drop-in usage as a replacement for vimdiff/meld in a real git repo
 
 ## Phase 9 — AI-Refactor Summarizer (rule-based)
@@ -89,3 +89,27 @@ Target release: Q3 2026. Tracking checklist — check items off as completed.
 - [x] Write CHANGELOG.md
 - [ ] Tag and publish v0.1.0 (initial public release)
 - [ ] Plan and execute Q3 2026 target release milestone
+
+## Phase 14 — Adoption & Usability
+- [x] Add TypeScript support (`.ts`, `.mts`, `.cts`, `.tsx`) via tree-sitter-typescript, with tests in `tests/languages.rs`
+- [x] Restructure CLI into optional subcommands without breaking `semadiff OLD NEW`
+- [x] `semadiff git-setup` / `--uninstall`: write difftool config (`--external`, `--local`/`--global`), idempotent; closes the Phase 8 git-config scripting item
+- [x] Git revision mode: `semadiff --rev HEAD~1` / `A..B` diffs all changed supported files (via `git diff --name-status -z` + `git show`)
+- [x] Directory-to-directory diff for non-git use
+- [x] Multi-file output: per-file grouping in text, JSON `{files: [...]}` (document in docs/json-schema.md; single-file shape unchanged)
+- [x] Built-in CI gate: `--max-functions N` and `--fail-on-unparseable` (exit 1 on breach); rewrite docs/ci-enforcement.md around it, keep shell script as fallback
+- [x] `--out markdown` renderer for GitHub PR comments, plus a copy-paste GitHub Actions snippet in the docs
+- [x] `semadiff completions <shell>` (bash, zsh, fish, powershell) via clap_complete
+- [x] `semadiff doctor`: check git on PATH, difftool config, API key set/unset (never print it), built-in grammars
+- [x] Default `--summary rules` when stdout is a terminal
+- [x] cargo-dist installers (`shell`, `powershell`), regenerate release workflow, add Install section to README
+- [ ] Verify new dependencies build on MSRV 1.75 (bump or pin if not)
+- [x] CLI tests using a temp git repo (git-setup, `--rev`, `--max-functions`, markdown snapshot)
+- [x] Update README, docs/usage.md, docs/git-integration.md; add CHANGELOG `Unreleased` entry
+
+## Later / ideas (not scheduled)
+- [ ] Reusable GitHub Action wrapping the CI gate
+- [ ] pre-commit hook config
+- [ ] `.semadiff.toml` project config file
+- [ ] SARIF output
+- [ ] Homebrew / winget packaging

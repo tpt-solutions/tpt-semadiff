@@ -35,7 +35,7 @@ version; new keys may be added.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `old_name`, `new_name` | string | The paths as given on the command line. |
-| `language` | string | `rust`, `python`, `javascript` or `go`. |
+| `language` | string | `rust`, `python`, `javascript`, `typescript`, `tsx` or `go`. |
 | `engine` | string | `chawathe` or `zhang-shasha`. |
 | `counts` | object | Number of changes per `op`: `insert`, `delete`, `move`, `update`. |
 | `groups` | array | Changes grouped by enclosing function, ordered by first line. |
@@ -57,6 +57,27 @@ version; new keys may be added.
 - `update` means a matched node changed its kind or its value.
 - A change with no enclosing function appears in the group whose `function` is `null`.
 - Summaries are advisory. Do not key CI rules on them.
+
+## Several files
+
+Directory mode (`semadiff OLD_DIR NEW_DIR`) and revision mode (`semadiff --rev ...`) print an
+envelope instead of one object:
+
+```json
+{
+  "files": [
+    { "old_name": "...", "new_name": "...", "language": "rust", "counts": { }, "groups": [ ] },
+    { "old_name": "src/broken.rs", "new_name": "src/broken.rs", "error": "syntax error on line 3" }
+  ]
+}
+```
+
+- `files` lists only the files that changed, in path order. Each entry has the fields above.
+- A changed file that could not be parsed has `old_name`, `new_name` and `error` instead. Its
+  `error` is the reason. It has no `counts` or `groups`.
+- Unsupported files are not listed. With no changes, `files` is an empty array.
+
+A single file pair keeps the single-object shape above, so existing consumers are unaffected.
 
 ## Using it in CI
 
