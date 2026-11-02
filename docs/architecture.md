@@ -55,3 +55,12 @@ new file ─┘  (tree-sitter)  (trivia)   (matching)  └─                   
   envelope.
 - `setup.rs`: `git-setup`. Reads and writes git config through `git config`.
 - `doctor.rs`: `doctor`.
+
+## Feature flags and library-only API
+
+- The `llm` feature of `tpt-semadiff-core` adds the Anthropic client and the LLM summarizer,
+  and the `ureq` HTTP dependency with it. It is off by default, and the CLI turns it on. The TUI
+  and other library users get the offline build.
+- `Normalized::reconstruct`, `segments`, `cst` and `origin` are library API. The CLI does not
+  use them. They are kept so that a tool can map a node back to its source or rebuild a file
+  byte for byte. Tests cover `reconstruct`.

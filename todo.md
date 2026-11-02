@@ -103,13 +103,38 @@ Target release: Q3 2026. Tracking checklist — check items off as completed.
 - [x] `semadiff doctor`: check git on PATH, difftool config, API key set/unset (never print it), built-in grammars
 - [x] Default `--summary rules` when stdout is a terminal
 - [x] cargo-dist installers (`shell`, `powershell`), regenerate release workflow, add Install section to README
-- [ ] Verify new dependencies build on MSRV 1.75 (bump or pin if not)
+- [x] Verify new dependencies build on MSRV (bumped to 1.90 for current dependency tree)
 - [x] CLI tests using a temp git repo (git-setup, `--rev`, `--max-functions`, markdown snapshot)
 - [x] Update README, docs/usage.md, docs/git-integration.md; add CHANGELOG `Unreleased` entry
 
+## Phase 15 — Spec gaps & rough edges (core)
+- [x] Semantic unified output: group `--out unified` hunks by function/class block with headers (render.rs `render_unified` is currently a plain line diff)
+- [x] Function detection: add arrow functions, function expressions, Go func literals, Rust closures to `function_kinds` (parse.rs) so `--max-functions` and grouping are accurate
+- [x] Summarizer rules: share name lookup with report.rs (`property_identifier`, `field_identifier`); per-language body kinds instead of `kind.contains("block")`; widen `inline_lines` beyond literal `=`
+- [x] LLM summary visibility: stop discarding `Summary.source` (pipeline.rs), report why a rules fallback happened, make `max_tokens`/system prompt overridable via env, verify default model id
+- [x] Make `ureq` an optional `llm` feature (default on in CLI); centralize grammar/dep versions in `[workspace.dependencies]`
+- [x] Wire `Normalized::reconstruct`/`segments`/`cst`/`origin` into a real consumer or document as library-only; remove unused `Mapping::len`/`is_empty`
+- [x] `--ignore-formatting`: also ignore trailing-comma/paren-only changes; document the exact guarantee
+
+## Phase 16 — Adoption tooling
+- [x] `.semadiff.toml` project config (discovered upward from cwd; flags override) and `semadiff init` template writer
+- [x] Directory/`--rev` excludes: honor `.gitignore`, add `--exclude GLOB`, default-skip lockfiles, `vendor/`, `node_modules/`, minified/generated files
+- [x] `--lang <name>` override, extra extension mappings in config, shebang sniffing for extensionless scripts
+- [x] `.gitattributes` per-path diff driver: `git-setup --driver`, docs for `*.rs diff=semadiff`; also set `difftool.prompt=false`
+- [ ] `.pre-commit-hooks.yaml`, optional `git semadiff` alias, and `--quiet`/`--stat`/`--name-only` output modes for hooks
+- [x] Formal JSON Schema file (`docs/semadiff.schema.json`) plus `schema_version` in `--out json`, validated by a test
+- [x] Man page via `clap_mangen` (`semadiff man`) and per-shell completion install docs
+- [x] Parallel multi-file diffing in `run_multi`; size/time warning for `--engine zhang-shasha` on large inputs
+- [ ] cargo-dist: add Homebrew and npm installers, musl Linux targets; `cargo-binstall` metadata; dependabot config
+- [x] Docs/community: CONTRIBUTING.md, SECURITY.md, issue/PR templates, README quickstart with real output, "vs difftastic/diffsitter" comparison, privacy note for `--summary llm`
+- [x] Release prep: move CHANGELOG `Unreleased` to 0.1.0, make README install section unconditional, confirm publish.yml order/secrets (user tags v0.1.0)
+
 ## Later / ideas (not scheduled)
+- [ ] More grammars: JSON, YAML, TOML, Java, C, C++
+- [ ] Merge driver / mergetool (currently a documented non-goal)
+- [ ] VS Code extension / LSP server using the JSON output
 - [ ] Reusable GitHub Action wrapping the CI gate
 - [ ] pre-commit hook config
-- [ ] `.semadiff.toml` project config file
+- [x] `.semadiff.toml` project config file
 - [ ] SARIF output
 - [ ] Homebrew / winget packaging

@@ -7,13 +7,20 @@ what it is, not as every line that happens to differ.
 It is built for reviewing large blocks of AI-generated code, where line diffs are noisy and
 easily mislead a reviewer.
 
+Quickstart, on two versions of one function (`old.rs` and `new.rs`):
+
 ```
-File: src/main.rs
-┌─ Function: calculate_metrics (Lines 40-85) ──────────────────────┐
-│ [UPDATE] Changed `sum` to `acc`                                  │
-│ [INSERT] Added `if metrics.is_empty() {`                         │
-└──────────────────────────────────────────────────────────────────┘
+$ semadiff old.rs new.rs
+File: old.rs -> new.rs
+┌─ Function: calculate_metrics (Lines 1-7) ──┐
+│ [INSERT] Added `if values.is_empty() {`    │
+│ [UPDATE] Changed `sum` to `acc`            │
+│ [UPDATE] Changed `sum` to `acc`            │
+└────────────────────────────────────────────┘
 ```
+
+Each change is listed under the function it belongs to. The exit status is `1`, since changes
+were found. Add `--stat` for one line per file, or `--name-only` for the list of changed files.
 
 ## Status
 
@@ -35,7 +42,7 @@ for the design.
 
 ## Install
 
-Once v0.1.0 is released, the prebuilt binary installs with one command:
+The prebuilt binary installs with one command:
 
 ```
 # macOS and Linux
@@ -71,11 +78,17 @@ semadiff --out markdown --rev A..B     # Markdown for a pull request comment
 semadiff --ignore-formatting OLD NEW   # comment-only edits report zero changes
 semadiff --summary llm OLD NEW         # plain-English summary via the Anthropic API
 semadiff --max-functions 3 --rev A...B # CI gate: fail when more than 3 functions change
+semadiff --stat --rev A...B            # one line per changed file
+semadiff --name-only --rev A...B       # just the names of changed files, for scripts
 semadiff --tui OLD NEW                 # interactive viewer
+semadiff init                          # write a commented .semadiff.toml
 semadiff doctor                        # check git, the difftool and the grammars
 ```
 
 Exit status: `0` no semantic changes, `1` changes found or a CI gate tripped, `2` error.
+
+Project settings (engine, summary, excludes, CI gates, extension mappings) can live in a
+`.semadiff.toml`. See [docs/usage.md](docs/usage.md#project-config).
 
 Full reference: [docs/usage.md](docs/usage.md). Git setup: [docs/git-integration.md](docs/git-integration.md).
 JSON format: [docs/json-schema.md](docs/json-schema.md). CI gate: [docs/ci-enforcement.md](docs/ci-enforcement.md).

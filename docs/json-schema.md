@@ -82,3 +82,18 @@ A single file pair keeps the single-object shape above, so existing consumers ar
 ## Using it in CI
 
 See [ci-enforcement.md](ci-enforcement.md) for an example that counts changed functions.
+
+## Schema file and version
+
+[semadiff.schema.json](semadiff.schema.json) is a JSON Schema (draft 2020-12) for the output.
+A test in the CLI crate checks real output against it, so the file and the program agree.
+
+Every report carries `"schema_version": 1`. Directory and revision modes wrap the list in an
+envelope that carries the same number. The version changes only when a field is removed or its
+meaning changes. Adding an optional field does not change it, so read unknown fields as
+ignorable.
+
+The optional summary fields are present only when a summary was asked for:
+
+- `summary_source`: `"rules"` or `"llm"`, the source of `summaries`.
+- `summary_fallback`: why `--summary llm` used the rules instead. Absent when the LLM answered.

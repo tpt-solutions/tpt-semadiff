@@ -84,3 +84,20 @@ git difftool -- src/lib.rs     # comment change: shown
 
 Then add `--ignore-formatting` to the command in `difftool.semadiff.cmd` to see comment-only
 edits suppressed.
+
+## Per-file drivers and the `git semadiff` alias
+
+`semadiff git-setup --driver` registers `diff.semadiff.command`, so that git can use semadiff for
+some paths only. It also sets `difftool.prompt=false`, so that `git difftool` does not ask before
+each file. Then select the paths in `.gitattributes`:
+
+```
+*.rs   diff=semadiff
+*.py   diff=semadiff
+```
+
+`git diff` uses semadiff for those paths and the normal diff for the rest. The driver exits `0`,
+as git requires, and the output is the semantic report.
+
+`semadiff git-setup --alias` adds `alias.semadiff = !semadiff`, so that `git semadiff --rev HEAD`
+works. `semadiff git-setup --uninstall` removes the driver and alias when they name semadiff.
