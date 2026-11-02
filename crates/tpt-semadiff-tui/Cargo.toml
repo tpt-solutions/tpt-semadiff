@@ -1,0 +1,13 @@
+[package]
+name = "tpt-semadiff-tui"
+description = "Interactive terminal viewer for tpt-semadiff reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpt-semadiff-core.workspace = true
+ratatui.workspace = true
