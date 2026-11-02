@@ -16,3 +16,5 @@ path = "src/main.rs"
 tpt-semadiff-core.workspace = true
 tpt-semadiff-tui.workspace = true
 clap.workspace = true
+clap_complete = "4"
+serde_json.workspace = true

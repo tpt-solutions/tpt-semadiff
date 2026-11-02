@@ -1,20 +1,28 @@
-//! `semadiff`: structural, AST-aware diff for source files.
+//! `semadiff`: structural, AST-aware diff for source files, directories and git revisions.
 //!
-//! Exit status: `0` no semantic changes, `1` changes found, `2` usage or I/O error.
+//! Exit status: `0` no semantic changes, `1` changes found or a CI gate tripped, `2` usage
+//! or I/O error. Git's external-diff form always exits `0`, as git requires.
 
+mod dirs;
+mod doctor;
+mod output;
+mod pipeline;
+mod rev;
+mod setup;
+
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, ValueEnum};
-use tpt_semadiff_core::diff::{diff_files, Engine, FileDiff, Options};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use tpt_semadiff_core::diff::{Engine, Options};
 use tpt_semadiff_core::parse::SourceLang;
-use tpt_semadiff_core::render;
-use tpt_semadiff_core::report::Report;
-use tpt_semadiff_core::summarize::llm::{self, AnthropicClient, LlmClient};
-use tpt_semadiff_core::summarize::rules;
+use tpt_semadiff_core::summarize::llm::AnthropicClient;
+
+use pipeline::{Entry, Outcome, Pair, Summary};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -23,12 +31,28 @@ use tpt_semadiff_core::summarize::rules;
     about = "Structural, AST-aware diff for source files",
     long_about = "Compares two versions of a source file by its syntax tree rather than by \
                   lines. Exit status: 0 no semantic changes, 1 changes found, 2 error.\n\n\
-                  As a git difftool: git config difftool.semadiff.cmd 'semadiff \"$LOCAL\" \"$REMOTE\"'"
+                  As a git difftool: `semadiff git-setup` writes the git config for you.",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
 )]
 struct Cli {
-    /// OLD and NEW file. Git's external-diff form (seven arguments) is also accepted.
-    #[arg(required = true, num_args = 2..=7, value_name = "FILE")]
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// OLD and NEW file, or two directories. Git's external-diff form (seven arguments) is
+    /// also accepted.
+    #[arg(
+        num_args = 2..=7,
+        value_name = "FILE",
+        required_unless_present = "rev",
+        conflicts_with = "rev"
+    )]
     files: Vec<PathBuf>,
+
+    /// Compare REV with the working tree, or `A..B` (two revisions) or `A...B` (B with the
+    /// merge base of A and B). Only files git reports as changed are compared.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutFormat::Text)]
@@ -47,13 +71,55 @@ struct Cli {
     color: ColorArg,
 
     /// Add a natural-language summary. `rules` runs offline; `llm` calls the Anthropic
-    /// API (needs ANTHROPIC_API_KEY) and falls back to `rules` on failure.
+    /// API (needs ANTHROPIC_API_KEY) and falls back to `rules` on failure. Without this
+    /// flag, `rules` is used when stdout is a terminal; `off` turns it off there too.
     #[arg(long, value_enum)]
     summary: Option<SummaryArg>,
 
-    /// Browse the changes in an interactive terminal viewer instead of printing.
+    /// Browse the changes in an interactive terminal viewer instead of printing. Works on
+    /// one file pair only.
     #[arg(long)]
     tui: bool,
+
+    /// CI gate: exit 1 when more than N distinct functions changed across all files.
+    #[arg(long, value_name = "N")]
+    max_functions: Option<usize>,
+
+    /// CI gate: exit 1 when a changed file cannot be parsed.
+    #[arg(long)]
+    fail_on_unparseable: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Configure git to use semadiff for `git difftool`.
+    GitSetup(GitSetupArgs),
+    /// Print a shell completion script to stdout.
+    Completions {
+        /// The shell to generate for.
+        shell: clap_complete::Shell,
+    },
+    /// Check git, the difftool config, the API key and the built-in grammars.
+    Doctor,
+}
+
+#[derive(Args, Debug)]
+struct GitSetupArgs {
+    /// Write to the global git config (the default).
+    #[arg(long, conflicts_with = "local")]
+    global: bool,
+
+    /// Write to the current repository's config.
+    #[arg(long)]
+    local: bool,
+
+    /// Also make `git diff` use semadiff, through `diff.external`.
+    #[arg(long)]
+    external: bool,
+
+    /// Remove the settings instead of writing them.
+    #[arg(long)]
+    uninstall: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +130,8 @@ enum OutFormat {
     Unified,
     /// Structured semantic diff as JSON.
     Json,
+    /// GitHub-flavoured Markdown, for pull request comments.
+    Markdown,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,10 +153,31 @@ enum ColorArg {
 enum SummaryArg {
     Rules,
     Llm,
+    /// No summary, even on a terminal.
+    Off,
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let mut cli = Cli::parse();
+    let result = match cli.command.take() {
+        Some(Command::GitSetup(args)) => setup::run(&setup::Setup {
+            scope: if args.local {
+                setup::Scope::Local
+            } else {
+                setup::Scope::Global
+            },
+            external: args.external,
+            uninstall: args.uninstall,
+        })
+        .map(|()| ExitCode::SUCCESS),
+        Some(Command::Completions { shell }) => {
+            clap_complete::generate(shell, &mut Cli::command(), "semadiff", &mut io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Doctor) => Ok(doctor::run()),
+        None => run_diff(&cli),
+    };
+    match result {
         Ok(code) => code,
         Err(err) => {
             eprintln!("semadiff: {err}");
@@ -97,86 +186,163 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode, Box<dyn Error>> {
+fn run_diff(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
+    let options = Options {
+        engine: match cli.engine {
+            EngineArg::Chawathe => Engine::Chawathe,
+            EngineArg::ZhangShasha => Engine::ZhangShasha,
+        },
+        ignore_formatting: cli.ignore_formatting,
+    };
+    let summary = summary_choice(cli.summary);
+    let llm = llm_client(summary);
+    let color = use_color(cli.color);
+
+    if let Some(spec) = &cli.rev {
+        let (pairs, skipped) = rev::pairs(spec)?;
+        if skipped > 0 {
+            eprintln!("semadiff: skipped {skipped} changed file(s) with unsupported extensions");
+        }
+        return run_multi(cli, pairs, options, summary, llm.as_ref(), color);
+    }
+
     let (old_path, new_path) = match cli.files.len() {
         2 => (&cli.files[0], &cli.files[1]),
         7 => (&cli.files[1], &cli.files[4]),
         n => return Err(format!("expected 2 files, got {n}").into()),
     };
+    if old_path.is_dir() || new_path.is_dir() {
+        if !(old_path.is_dir() && new_path.is_dir()) {
+            return Err("cannot compare a directory with a file".into());
+        }
+        let pairs = dirs::pairs(old_path, new_path)?;
+        return run_multi(cli, pairs, options, summary, llm.as_ref(), color);
+    }
+
     // Git's external-diff protocol treats any non-zero status as a failure, so that form
     // always exits 0 on success. Changes are then only visible in the output.
     let external = cli.files.len() == 7;
-    let old_src = read_side(old_path)?;
-    let new_src = read_side(new_path)?;
-    let old_name = old_path.display().to_string();
-    let new_name = new_path.display().to_string();
-
-    let engine = match cli.engine {
-        EngineArg::Chawathe => Engine::Chawathe,
-        EngineArg::ZhangShasha => Engine::ZhangShasha,
+    let pair = Pair {
+        old_name: old_path.display().to_string(),
+        new_name: new_path.display().to_string(),
+        old_src: read_side(old_path)?,
+        new_src: read_side(new_path)?,
+        lang: SourceLang::from_path(new_path).or_else(|| SourceLang::from_path(old_path)),
     };
-    let options = Options {
-        engine,
-        ignore_formatting: cli.ignore_formatting,
-    };
-    let lang = SourceLang::from_path(new_path).or_else(|| SourceLang::from_path(old_path));
-    let outcome = match lang {
-        Some(lang) => diff_files(&old_src, &new_src, lang, options).map_err(|e| e.to_string()),
-        None => Err("unsupported file type".to_owned()),
-    };
-
-    let diff = match outcome {
-        Ok(diff) => diff,
-        Err(reason) if cli.out == OutFormat::Json || cli.tui => return Err(reason.into()),
-        Err(reason) => {
-            eprintln!("semadiff: falling back to a line diff ({reason})");
-            print!(
-                "{}",
-                render::render_unified(&old_name, &new_name, &old_src, &new_src)
-            );
-            return Ok(exit_code(external, old_src == new_src));
+    let entry = pipeline::diff_pair(pair, options, summary, llm.as_ref());
+    if let Some(reason) = entry.fallback_reason() {
+        if cli.out == OutFormat::Json || cli.tui {
+            return Err(reason.into());
         }
-    };
-
-    let mut report = Report::from_diff(&diff, &old_name, &new_name, engine.name());
-    report.summaries = summarize(cli.summary, &diff, &report);
+    }
 
     if cli.tui {
-        tpt_semadiff_tui::run(&report)?;
-    } else {
-        match cli.out {
-            OutFormat::Json => println!("{}", report.to_json()?),
-            OutFormat::Unified => print!(
-                "{}",
-                render::render_unified(&old_name, &new_name, &old_src, &new_src)
-            ),
-            OutFormat::Text => print!("{}", render::render_report(&report, use_color(cli.color))),
+        if let Outcome::Diffed { report, .. } = &entry.outcome {
+            tpt_semadiff_tui::run(report)?;
         }
+    } else {
+        output::print(std::slice::from_ref(&entry), cli.out, color, false)?;
     }
-    Ok(exit_code(external, diff.ops.is_empty()))
+    Ok(finish(cli, std::slice::from_ref(&entry), external))
 }
 
-fn summarize(choice: Option<SummaryArg>, diff: &FileDiff, report: &Report) -> Vec<String> {
-    match choice {
-        None => Vec::new(),
-        Some(SummaryArg::Rules) => rules::summarize(diff),
-        Some(SummaryArg::Llm) => {
-            let client = AnthropicClient::from_env();
-            if client.is_none() {
-                eprintln!("semadiff: ANTHROPIC_API_KEY is not set; using the rule-based summary");
-            }
-            let client = client.as_ref().map(|c| c as &dyn LlmClient);
-            llm::summarize_with_fallback(client, diff, report).lines
-        }
+/// Diffs several pairs and prints the ones that changed.
+fn run_multi(
+    cli: &Cli,
+    pairs: Vec<Pair>,
+    options: Options,
+    summary: Option<Summary>,
+    llm: Option<&AnthropicClient>,
+    color: bool,
+) -> Result<ExitCode, Box<dyn Error>> {
+    if cli.tui {
+        return Err("--tui shows one file pair; pass OLD and NEW files".into());
     }
+    let entries: Vec<Entry> = pairs
+        .into_iter()
+        .map(|pair| pipeline::diff_pair(pair, options, summary, llm))
+        .filter(Entry::changed)
+        .collect();
+    output::print(&entries, cli.out, color, true)?;
+    Ok(finish(cli, &entries, false))
 }
 
-fn exit_code(external: bool, unchanged: bool) -> ExitCode {
-    if external || unchanged {
-        ExitCode::SUCCESS
-    } else {
+/// The exit status for the entries that were printed, after any CI gate.
+fn finish(cli: &Cli, entries: &[Entry], external: bool) -> ExitCode {
+    if external {
+        return ExitCode::SUCCESS;
+    }
+    let mut failed = entries.iter().any(Entry::changed);
+    for problem in gate_problems(cli, entries) {
+        eprintln!("semadiff: {problem}");
+        failed = true;
+    }
+    if failed {
         ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
+}
+
+/// The CI gate checks that the flags ask for. Each problem is one line for stderr.
+fn gate_problems(cli: &Cli, entries: &[Entry]) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Some(limit) = cli.max_functions {
+        let mut names = BTreeSet::new();
+        for entry in entries {
+            if let Outcome::Diffed { report, .. } = &entry.outcome {
+                names.extend(report.changed_functions());
+            }
+        }
+        if names.len() > limit {
+            let list: Vec<String> = names.iter().map(|n| format!("  - {n}")).collect();
+            problems.push(format!(
+                "{} functions changed, over the limit of {limit}; a human reviewer is required\n{}",
+                names.len(),
+                list.join("\n")
+            ));
+        }
+    }
+    if cli.fail_on_unparseable {
+        let bad: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.changed() && matches!(e.outcome, Outcome::Unparsed { .. }))
+            .map(|e| e.pair.new_name.as_str())
+            .collect();
+        if !bad.is_empty() {
+            problems.push(format!(
+                "{} file(s) could not be parsed: {}",
+                bad.len(),
+                bad.join(", ")
+            ));
+        }
+    }
+    problems
+}
+
+/// `--summary` as given, with the terminal default applied: `rules` on a terminal,
+/// nothing otherwise, so that piped output stays plain.
+fn summary_choice(arg: Option<SummaryArg>) -> Option<Summary> {
+    match arg {
+        Some(SummaryArg::Rules) => Some(Summary::Rules),
+        Some(SummaryArg::Llm) => Some(Summary::Llm),
+        Some(SummaryArg::Off) => None,
+        None if io::stdout().is_terminal() => Some(Summary::Rules),
+        None => None,
+    }
+}
+
+/// The API client for `--summary llm`. Missing credentials are reported once here, and
+/// the summary then falls back to rules.
+fn llm_client(summary: Option<Summary>) -> Option<AnthropicClient> {
+    if summary != Some(Summary::Llm) {
+        return None;
+    }
+    let client = AnthropicClient::from_env();
+    if client.is_none() {
+        eprintln!("semadiff: ANTHROPIC_API_KEY is not set; using the rule-based summary");
+    }
+    client
 }
 
 fn use_color(choice: ColorArg) -> bool {
