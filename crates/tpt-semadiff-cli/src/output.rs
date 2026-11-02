@@ -6,17 +6,47 @@ use std::fmt::Write;
 
 use serde_json::{json, Value};
 use tpt_semadiff_core::render;
+use tpt_semadiff_core::report::SCHEMA_VERSION;
 
 use crate::pipeline::{Entry, Outcome};
 use crate::OutFormat;
 
-/// Prints `entries` in `format`. `multi` selects the file-list shape for JSON.
+/// How much of each file to print. `Full` is the chosen `--out` format; the others are
+/// brief forms for scripts and hooks, and they ignore `--out`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Brief {
+    Full,
+    /// One line per changed file, with its change counts.
+    Stat,
+    /// The name of each changed file.
+    NameOnly,
+    /// Nothing; only the exit status says whether anything changed.
+    Quiet,
+}
+
+/// Prints `entries` in `format`, or in the brief form. `multi` selects the file-list shape
+/// for JSON.
 pub fn print(
     entries: &[Entry],
     format: OutFormat,
     color: bool,
     multi: bool,
+    brief: Brief,
 ) -> Result<(), Box<dyn Error>> {
+    match brief {
+        Brief::Quiet => return Ok(()),
+        Brief::NameOnly => {
+            for entry in entries.iter().filter(|e| e.changed()) {
+                println!("{}", entry.pair.new_name);
+            }
+            return Ok(());
+        }
+        Brief::Stat => {
+            print!("{}", stat(entries));
+            return Ok(());
+        }
+        Brief::Full => {}
+    }
     match format {
         OutFormat::Text => print!("{}", text(entries, color)),
         OutFormat::Unified => {
@@ -31,6 +61,39 @@ pub fn print(
     Ok(())
 }
 
+/// One line per changed file with its change counts, then a total. Files that did not parse
+/// say so instead.
+fn stat(entries: &[Entry]) -> String {
+    let changed: Vec<&Entry> = entries.iter().filter(|e| e.changed()).collect();
+    if changed.is_empty() {
+        return "No semantic changes.\n".to_owned();
+    }
+    let width = changed
+        .iter()
+        .map(|e| e.pair.new_name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for entry in &changed {
+        let detail = match &entry.outcome {
+            Outcome::Diffed { report, .. } => {
+                let c = report.counts;
+                format!(
+                    "{} inserted, {} deleted, {} moved, {} updated",
+                    c.insert, c.delete, c.moved, c.update
+                )
+            }
+            Outcome::Unsupported | Outcome::Unparsed { .. } => format!(
+                "not diffed structurally ({})",
+                entry.fallback_reason().unwrap_or("unknown")
+            ),
+        };
+        let _ = writeln!(out, "{:<width$} | {detail}", entry.pair.new_name);
+    }
+    let _ = writeln!(out, "{} file(s) changed", changed.len());
+    out
+}
+
 fn warn_fallback(entry: &Entry) {
     if let Some(reason) = entry.fallback_reason() {
         eprintln!(
@@ -42,7 +105,13 @@ fn warn_fallback(entry: &Entry) {
 
 fn unified(entry: &Entry) -> String {
     let pair = &entry.pair;
-    render::render_unified(&pair.old_name, &pair.new_name, &pair.old_src, &pair.new_src)
+    render::render_unified(
+        &pair.old_name,
+        &pair.new_name,
+        &pair.old_src,
+        &pair.new_src,
+        pair.lang,
+    )
 }
 
 fn text(entries: &[Entry], color: bool) -> String {
@@ -91,7 +160,10 @@ fn json(entries: &[Entry], multi: bool) -> Result<String, Box<dyn Error>> {
             })),
         })
         .collect::<Result<Vec<Value>, _>>()?;
-    Ok(serde_json::to_string_pretty(&json!({ "files": files }))?)
+    Ok(serde_json::to_string_pretty(&json!({
+        "schema_version": SCHEMA_VERSION,
+        "files": files,
+    }))?)
 }
 
 /// Markdown sections for a pull request comment. A file that did not parse gets its line

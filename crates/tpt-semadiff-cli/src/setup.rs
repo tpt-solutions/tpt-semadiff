@@ -13,6 +13,11 @@ const EXTERNAL_CMD: &str = "semadiff";
 const DIFFTOOL_CMD_KEY: &str = "difftool.semadiff.cmd";
 const TRUST_KEY: &str = "difftool.semadiff.trustExitCode";
 const EXTERNAL_KEY: &str = "diff.external";
+/// The `--driver` settings: a diff driver that `.gitattributes` can select per path.
+const DRIVER_KEY: &str = "diff.semadiff.command";
+const PROMPT_KEY: &str = "difftool.prompt";
+const ALIAS_KEY: &str = "alias.semadiff";
+const ALIAS_CMD: &str = "!semadiff";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -33,6 +38,11 @@ pub struct Setup {
     pub scope: Scope,
     /// Also make `git diff` use semadiff, through `diff.external`.
     pub external: bool,
+    /// Also register a diff driver, `diff.semadiff.command`, for `.gitattributes` to select.
+    /// Sets `difftool.prompt=false` as well, so that `git difftool` does not ask per file.
+    pub driver: bool,
+    /// Also add a `git semadiff` alias.
+    pub alias: bool,
     pub uninstall: bool,
 }
 
@@ -40,34 +50,60 @@ pub fn run(setup: &Setup) -> Result<(), Box<dyn Error>> {
     if setup.uninstall {
         uninstall(setup.scope)
     } else {
-        install(setup.scope, setup.external)
+        install(setup)
     }
 }
 
-fn install(scope: Scope, external: bool) -> Result<(), Box<dyn Error>> {
+fn install(setup: &Setup) -> Result<(), Box<dyn Error>> {
+    let scope = setup.scope;
     set(scope, DIFFTOOL_CMD_KEY, DIFFTOOL_CMD)?;
     set(scope, TRUST_KEY, TRUST_EXIT_CODE)?;
-    if external {
+    if setup.external {
         set(scope, EXTERNAL_KEY, EXTERNAL_CMD)?;
+    }
+    if setup.driver {
+        set(scope, DRIVER_KEY, EXTERNAL_CMD)?;
+        set(scope, PROMPT_KEY, "false")?;
+    }
+    if setup.alias {
+        set(scope, ALIAS_KEY, ALIAS_CMD)?;
     }
     println!(
         "Use `git difftool` with semadiff ({}). Run `semadiff doctor` to check the setup.",
         scope_name(scope)
     );
+    if setup.driver {
+        println!(
+            "To use the driver for some files, add a line such as `*.rs diff=semadiff` to \
+             .gitattributes, then run `git diff`."
+        );
+    }
     Ok(())
 }
 
 fn uninstall(scope: Scope) -> Result<(), Box<dyn Error>> {
     unset(scope, DIFFTOOL_CMD_KEY)?;
     unset(scope, TRUST_KEY)?;
-    // Only remove `diff.external` when it is ours. Another tool may own it.
-    match get(scope, EXTERNAL_KEY)? {
-        Some(value) if value == EXTERNAL_CMD => unset(scope, EXTERNAL_KEY)?,
-        Some(other) => println!("{EXTERNAL_KEY} is {other:?}, not semadiff; leaving it alone."),
-        None => {}
-    }
+    // Only remove `diff.external`, the driver and the alias when they are ours. Another tool
+    // may own them.
+    remove_if(scope, EXTERNAL_KEY, EXTERNAL_CMD)?;
+    remove_if(scope, DRIVER_KEY, EXTERNAL_CMD)?;
+    remove_if(scope, ALIAS_KEY, ALIAS_CMD)?;
+    // `difftool.prompt` is left alone: it may have been set by the user, not by this tool.
     println!("semadiff git settings removed ({}).", scope_name(scope));
     Ok(())
+}
+
+/// Removes `key` only when it holds `ours`. Reports a value that belongs to someone else.
+fn remove_if(scope: Scope, key: &str, ours: &str) -> Result<(), Box<dyn Error>> {
+    match get(scope, key)? {
+        Some(value) if value == ours => unset(scope, key),
+        Some(other) => {
+            println!("{key} is {other:?}, not semadiff; leaving it alone.");
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 fn scope_name(scope: Scope) -> &'static str {

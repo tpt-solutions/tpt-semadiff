@@ -3,6 +3,8 @@
 //! Exit status: `0` no semantic changes, `1` changes found or a CI gate tripped, `2` usage
 //! or I/O error. Git's external-diff form always exits `0`, as git requires.
 
+mod config;
+mod detect;
 mod dirs;
 mod doctor;
 mod output;
@@ -11,6 +13,7 @@ mod rev;
 mod setup;
 
 use std::collections::BTreeSet;
+use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -22,7 +25,12 @@ use tpt_semadiff_core::diff::{Engine, Options};
 use tpt_semadiff_core::parse::SourceLang;
 use tpt_semadiff_core::summarize::llm::AnthropicClient;
 
+use detect::{Excludes, Languages};
+use output::Brief;
 use pipeline::{Entry, Outcome, Pair, Summary};
+
+/// Pairs with more bytes than this get a warning when `--engine zhang-shasha` is used.
+const SLOW_ENGINE_BYTES: usize = 200_000;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,7 +39,8 @@ use pipeline::{Entry, Outcome, Pair, Summary};
     about = "Structural, AST-aware diff for source files",
     long_about = "Compares two versions of a source file by its syntax tree rather than by \
                   lines. Exit status: 0 no semantic changes, 1 changes found, 2 error.\n\n\
-                  As a git difftool: `semadiff git-setup` writes the git config for you.",
+                  As a git difftool: `semadiff git-setup` writes the git config for you. \
+                  Project settings can go in a .semadiff.toml file (see `semadiff init`).",
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true
 )]
@@ -58,11 +67,12 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutFormat::Text)]
     out: OutFormat,
 
-    /// Matching engine.
-    #[arg(long, value_enum, default_value_t = EngineArg::Chawathe)]
-    engine: EngineArg,
+    /// Matching engine. Defaults to `chawathe`, or the config file's `engine`.
+    #[arg(long, value_enum)]
+    engine: Option<EngineArg>,
 
-    /// Ignore comments, so that comment-only edits report zero changes.
+    /// Ignore comments, docstrings, redundant parentheses and trailing commas, so that
+    /// edits to them report zero changes.
     #[arg(long)]
     ignore_formatting: bool,
 
@@ -72,7 +82,7 @@ struct Cli {
 
     /// Add a natural-language summary. `rules` runs offline; `llm` calls the Anthropic
     /// API (needs ANTHROPIC_API_KEY) and falls back to `rules` on failure. Without this
-    /// flag, `rules` is used when stdout is a terminal; `off` turns it off there too.
+    /// flag, the config file's `summary` applies, then `rules` when stdout is a terminal.
     #[arg(long, value_enum)]
     summary: Option<SummaryArg>,
 
@@ -88,6 +98,28 @@ struct Cli {
     /// CI gate: exit 1 when a changed file cannot be parsed.
     #[arg(long)]
     fail_on_unparseable: bool,
+
+    /// Read every file as this language, whatever its extension (rust, python,
+    /// javascript, typescript, tsx or go).
+    #[arg(long, value_name = "NAME")]
+    lang: Option<String>,
+
+    /// Leave out paths matching this glob in directory and revision mode. Relative to the
+    /// compared root; `**/` matches at any depth. Repeatable.
+    #[arg(long, value_name = "GLOB")]
+    exclude: Vec<String>,
+
+    /// Print nothing. The exit status alone says whether anything changed.
+    #[arg(long, conflicts_with_all = ["stat", "name_only"])]
+    quiet: bool,
+
+    /// One line per changed file, with its change counts.
+    #[arg(long, conflicts_with = "name_only")]
+    stat: bool,
+
+    /// The path of each changed file, one per line.
+    #[arg(long)]
+    name_only: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,6 +133,14 @@ enum Command {
     },
     /// Check git, the difftool config, the API key and the built-in grammars.
     Doctor,
+    /// Print the man page (roff) to stdout.
+    Man,
+    /// Write a commented .semadiff.toml in the current directory.
+    Init {
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -117,6 +157,15 @@ struct GitSetupArgs {
     #[arg(long)]
     external: bool,
 
+    /// Also register a diff driver for `.gitattributes` (`diff.semadiff.command`), and set
+    /// `difftool.prompt=false`.
+    #[arg(long)]
+    driver: bool,
+
+    /// Also add a `git semadiff` alias.
+    #[arg(long)]
+    alias: bool,
+
     /// Remove the settings instead of writing them.
     #[arg(long)]
     uninstall: bool,
@@ -126,7 +175,7 @@ struct GitSetupArgs {
 enum OutFormat {
     /// Boxed per-function summary.
     Text,
-    /// Classic line-based unified diff.
+    /// Classic line-based unified diff, with each hunk named after its function.
     Unified,
     /// Structured semantic diff as JSON.
     Json,
@@ -157,6 +206,19 @@ enum SummaryArg {
     Off,
 }
 
+/// The effective settings for one run: flags first, then the config file, then defaults.
+struct Plan {
+    options: Options,
+    summary: Option<Summary>,
+    llm: Option<AnthropicClient>,
+    color: bool,
+    max_functions: Option<usize>,
+    fail_on_unparseable: bool,
+    languages: Languages,
+    excludes: Excludes,
+    brief: Brief,
+}
+
 fn main() -> ExitCode {
     let mut cli = Cli::parse();
     let result = match cli.command.take() {
@@ -167,6 +229,8 @@ fn main() -> ExitCode {
                 setup::Scope::Global
             },
             external: args.external,
+            driver: args.driver,
+            alias: args.alias,
             uninstall: args.uninstall,
         })
         .map(|()| ExitCode::SUCCESS),
@@ -175,6 +239,11 @@ fn main() -> ExitCode {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Doctor) => Ok(doctor::run()),
+        Some(Command::Man) => clap_mangen::Man::new(Cli::command())
+            .render(&mut io::stdout())
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(Into::into),
+        Some(Command::Init { force }) => init(force).map(|()| ExitCode::SUCCESS),
         None => run_diff(&cli),
     };
     match result {
@@ -186,24 +255,96 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_diff(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
-    let options = Options {
-        engine: match cli.engine {
-            EngineArg::Chawathe => Engine::Chawathe,
-            EngineArg::ZhangShasha => Engine::ZhangShasha,
-        },
-        ignore_formatting: cli.ignore_formatting,
+/// Writes the commented config template into the current directory.
+fn init(force: bool) -> Result<(), Box<dyn Error>> {
+    let path = Path::new(config::FILE_NAME);
+    if path.exists() && !force {
+        return Err(format!(
+            "{} already exists; pass --force to overwrite it",
+            config::FILE_NAME
+        )
+        .into());
+    }
+    fs::write(path, config::TEMPLATE)?;
+    println!(
+        "Wrote {}. Uncomment the settings you want.",
+        config::FILE_NAME
+    );
+    Ok(())
+}
+
+/// Combines the flags, the config file found from the current directory, and the defaults.
+fn build_plan(cli: &Cli) -> Result<Plan, Box<dyn Error>> {
+    let config = config::discover(&env::current_dir()?)?.unwrap_or_default();
+    let engine = match cli.engine {
+        Some(engine) => engine,
+        None => from_config(config.engine.as_deref(), "engine")?.unwrap_or(EngineArg::Chawathe),
     };
-    let summary = summary_choice(cli.summary);
-    let llm = llm_client(summary);
-    let color = use_color(cli.color);
+    let summary_arg = match cli.summary {
+        Some(arg) => Some(arg),
+        None => from_config(config.summary.as_deref(), "summary")?,
+    };
+    let summary = summary_choice(summary_arg);
+    let forced = cli
+        .lang
+        .as_deref()
+        .map(|name| {
+            SourceLang::from_name(name).ok_or_else(|| {
+                let known = SourceLang::ALL.map(SourceLang::name).join(", ");
+                format!("unknown language {name:?}; expected one of {known}")
+            })
+        })
+        .transpose()?;
+    let mut patterns = config.exclude.clone();
+    patterns.extend(cli.exclude.iter().cloned());
+
+    Ok(Plan {
+        options: Options {
+            engine: match engine {
+                EngineArg::Chawathe => Engine::Chawathe,
+                EngineArg::ZhangShasha => Engine::ZhangShasha,
+            },
+            ignore_formatting: cli.ignore_formatting || config.ignore_formatting,
+        },
+        summary,
+        llm: llm_client(summary),
+        color: use_color(cli.color),
+        max_functions: cli.max_functions.or(config.max_functions),
+        fail_on_unparseable: cli.fail_on_unparseable || config.fail_on_unparseable,
+        languages: Languages::new(forced, &config.extensions)?,
+        excludes: Excludes::new(&patterns)?,
+        brief: brief(cli),
+    })
+}
+
+/// A setting from the config file, parsed the same way as the matching flag.
+fn from_config<T: ValueEnum>(value: Option<&str>, key: &str) -> Result<Option<T>, Box<dyn Error>> {
+    value
+        .map(|v| T::from_str(v, true).map_err(|e| format!(".semadiff.toml: {key}: {e}").into()))
+        .transpose()
+}
+
+fn brief(cli: &Cli) -> Brief {
+    if cli.quiet {
+        Brief::Quiet
+    } else if cli.name_only {
+        Brief::NameOnly
+    } else if cli.stat {
+        Brief::Stat
+    } else {
+        Brief::Full
+    }
+}
+
+fn run_diff(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
+    let plan = build_plan(cli)?;
 
     if let Some(spec) = &cli.rev {
-        let (pairs, skipped) = rev::pairs(spec)?;
+        let (pairs, skipped) = rev::pairs(spec, &plan.languages, &plan.excludes)?;
         if skipped > 0 {
-            eprintln!("semadiff: skipped {skipped} changed file(s) with unsupported extensions");
+            eprintln!("semadiff: skipped {skipped} changed file(s) with unsupported languages");
         }
-        return run_multi(cli, pairs, options, summary, llm.as_ref(), color);
+        return run_multi(cli, &plan, pairs);
     }
 
     let (old_path, new_path) = match cli.files.len() {
@@ -215,21 +356,28 @@ fn run_diff(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
         if !(old_path.is_dir() && new_path.is_dir()) {
             return Err("cannot compare a directory with a file".into());
         }
-        let pairs = dirs::pairs(old_path, new_path)?;
-        return run_multi(cli, pairs, options, summary, llm.as_ref(), color);
+        let pairs = dirs::pairs(old_path, new_path, &plan.languages, &plan.excludes)?;
+        return run_multi(cli, &plan, pairs);
     }
 
     // Git's external-diff protocol treats any non-zero status as a failure, so that form
     // always exits 0 on success. Changes are then only visible in the output.
     let external = cli.files.len() == 7;
+    let old_src = read_side(old_path)?;
+    let new_src = read_side(new_path)?;
+    let lang = plan
+        .languages
+        .lang_for(new_path, new_src.lines().next())
+        .or_else(|| plan.languages.lang_for(old_path, old_src.lines().next()));
     let pair = Pair {
         old_name: old_path.display().to_string(),
         new_name: new_path.display().to_string(),
-        old_src: read_side(old_path)?,
-        new_src: read_side(new_path)?,
-        lang: SourceLang::from_path(new_path).or_else(|| SourceLang::from_path(old_path)),
+        old_src,
+        new_src,
+        lang,
     };
-    let entry = pipeline::diff_pair(pair, options, summary, llm.as_ref());
+    warn_slow_engine(std::slice::from_ref(&pair), plan.options.engine);
+    let entry = pipeline::diff_pair(pair, plan.options, plan.summary, plan.llm.as_ref());
     if let Some(reason) = entry.fallback_reason() {
         if cli.out == OutFormat::Json || cli.tui {
             return Err(reason.into());
@@ -241,39 +389,56 @@ fn run_diff(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             tpt_semadiff_tui::run(report)?;
         }
     } else {
-        output::print(std::slice::from_ref(&entry), cli.out, color, false)?;
+        output::print(
+            std::slice::from_ref(&entry),
+            cli.out,
+            plan.color,
+            false,
+            plan.brief,
+        )?;
     }
-    Ok(finish(cli, std::slice::from_ref(&entry), external))
+    Ok(finish(&plan, std::slice::from_ref(&entry), external))
 }
 
 /// Diffs several pairs and prints the ones that changed.
-fn run_multi(
-    cli: &Cli,
-    pairs: Vec<Pair>,
-    options: Options,
-    summary: Option<Summary>,
-    llm: Option<&AnthropicClient>,
-    color: bool,
-) -> Result<ExitCode, Box<dyn Error>> {
+fn run_multi(cli: &Cli, plan: &Plan, pairs: Vec<Pair>) -> Result<ExitCode, Box<dyn Error>> {
     if cli.tui {
         return Err("--tui shows one file pair; pass OLD and NEW files".into());
     }
-    let entries: Vec<Entry> = pairs
-        .into_iter()
-        .map(|pair| pipeline::diff_pair(pair, options, summary, llm))
-        .filter(Entry::changed)
-        .collect();
-    output::print(&entries, cli.out, color, true)?;
-    Ok(finish(cli, &entries, false))
+    warn_slow_engine(&pairs, plan.options.engine);
+    let entries: Vec<Entry> =
+        pipeline::diff_all(pairs, plan.options, plan.summary, plan.llm.as_ref())
+            .into_iter()
+            .filter(Entry::changed)
+            .collect();
+    output::print(&entries, cli.out, plan.color, true, plan.brief)?;
+    Ok(finish(plan, &entries, false))
+}
+
+/// Zhang-Shasha is exact but slow on large inputs, so say so when it is asked to work on them.
+fn warn_slow_engine(pairs: &[Pair], engine: Engine) {
+    if engine != Engine::ZhangShasha {
+        return;
+    }
+    let big = pairs
+        .iter()
+        .filter(|p| p.old_src.len() + p.new_src.len() > SLOW_ENGINE_BYTES)
+        .count();
+    if big > 0 {
+        eprintln!(
+            "semadiff: --engine zhang-shasha can be slow; {big} file pair(s) are over 200 KB. \
+             The default chawathe engine is much faster on large files."
+        );
+    }
 }
 
 /// The exit status for the entries that were printed, after any CI gate.
-fn finish(cli: &Cli, entries: &[Entry], external: bool) -> ExitCode {
+fn finish(plan: &Plan, entries: &[Entry], external: bool) -> ExitCode {
     if external {
         return ExitCode::SUCCESS;
     }
     let mut failed = entries.iter().any(Entry::changed);
-    for problem in gate_problems(cli, entries) {
+    for problem in gate_problems(plan, entries) {
         eprintln!("semadiff: {problem}");
         failed = true;
     }
@@ -284,10 +449,10 @@ fn finish(cli: &Cli, entries: &[Entry], external: bool) -> ExitCode {
     }
 }
 
-/// The CI gate checks that the flags ask for. Each problem is one line for stderr.
-fn gate_problems(cli: &Cli, entries: &[Entry]) -> Vec<String> {
+/// The CI gate checks that the flags or config ask for. Each problem is one line for stderr.
+fn gate_problems(plan: &Plan, entries: &[Entry]) -> Vec<String> {
     let mut problems = Vec::new();
-    if let Some(limit) = cli.max_functions {
+    if let Some(limit) = plan.max_functions {
         let mut names = BTreeSet::new();
         for entry in entries {
             if let Outcome::Diffed { report, .. } = &entry.outcome {
@@ -303,7 +468,7 @@ fn gate_problems(cli: &Cli, entries: &[Entry]) -> Vec<String> {
             ));
         }
     }
-    if cli.fail_on_unparseable {
+    if plan.fail_on_unparseable {
         let bad: Vec<&str> = entries
             .iter()
             .filter(|e| e.changed() && matches!(e.outcome, Outcome::Unparsed { .. }))

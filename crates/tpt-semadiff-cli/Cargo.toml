@@ -1,6 +1,9 @@
 [package]
 name = "tpt-semadiff-cli"
 description = "Command-line front end for tpt-semadiff"
+readme = "README.md"
+keywords = ["diff", "git", "ast", "code-review", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,8 +16,26 @@ name = "semadiff"
 path = "src/main.rs"
 
 [dependencies]
-tpt-semadiff-core.workspace = true
+tpt-semadiff-core = { workspace = true, features = ["llm"] }
 tpt-semadiff-tui.workspace = true
 clap.workspace = true
 clap_complete = "4"
+clap_mangen = "0.2"
+serde.workspace = true
 serde_json.workspace = true
+toml = "0.8"
+ignore = "0.4"
+globset = "0.4"
+
+[dev-dependencies]
+jsonschema = "0.26"
+
+# `cargo binstall tpt-semadiff-cli` downloads the release archive built by cargo-dist.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"

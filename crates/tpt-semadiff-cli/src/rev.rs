@@ -6,13 +6,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use tpt_semadiff_core::parse::SourceLang;
-
+use crate::detect::{Excludes, Languages};
 use crate::pipeline::Pair;
 
 /// Pairs for every file that git reports as changed, plus the number of changed files
-/// skipped because their extension is not a supported language.
-pub fn pairs(spec: &str) -> Result<(Vec<Pair>, usize), Box<dyn Error>> {
+/// skipped because their language is not supported. Excluded paths are left out entirely.
+pub fn pairs(
+    spec: &str,
+    languages: &Languages,
+    excludes: &Excludes,
+) -> Result<(Vec<Pair>, usize), Box<dyn Error>> {
     let (old_label, old_rev, new_side) = parse_spec(spec)?;
     let root = git(&["rev-parse", "--show-toplevel"])?;
     let root = Path::new(root.trim_end());
@@ -42,12 +45,19 @@ pub fn pairs(spec: &str) -> Result<(Vec<Pair>, usize), Box<dyn Error>> {
             (path, path)
         };
 
-        let lang = SourceLang::from_path(Path::new(new_path))
-            .or_else(|| SourceLang::from_path(Path::new(old_path)));
-        let Some(lang) = lang else {
+        if excludes.excludes(Path::new(new_path)) {
+            continue;
+        }
+        let by_ext = languages
+            .lang_for(Path::new(new_path), None)
+            .or_else(|| languages.lang_for(Path::new(old_path), None));
+        // A file without an extension may still be a script with a `#!` line, so it is read
+        // first. Other unsupported files are skipped without being read.
+        let extensionless = Path::new(new_path).extension().is_none();
+        if by_ext.is_none() && !extensionless {
             skipped += 1;
             continue;
-        };
+        }
 
         let old_src = if code == 'A' {
             String::new()
@@ -61,6 +71,13 @@ pub fn pairs(spec: &str) -> Result<(Vec<Pair>, usize), Box<dyn Error>> {
                 let full = root.join(new_path);
                 fs::read_to_string(&full).map_err(|e| format!("{}: {e}", full.display()))?
             }
+        };
+
+        let Some(lang) =
+            by_ext.or_else(|| languages.lang_for(Path::new(new_path), new_src.lines().next()))
+        else {
+            skipped += 1;
+            continue;
         };
 
         let new_name = match &new_side {

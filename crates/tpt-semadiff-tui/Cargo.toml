@@ -1,6 +1,9 @@
 [package]
 name = "tpt-semadiff-tui"
 description = "Interactive terminal viewer for tpt-semadiff reports"
+readme = "README.md"
+keywords = ["tui", "diff", "ratatui", "terminal", "code-review"]
+categories = ["command-line-interface", "development-tools"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

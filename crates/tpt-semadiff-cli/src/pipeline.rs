@@ -59,6 +59,46 @@ impl Entry {
     }
 }
 
+/// Diffs every pair, spreading the work over the available CPUs. The entries come back in
+/// the order of `pairs`.
+pub fn diff_all(
+    pairs: Vec<Pair>,
+    options: Options,
+    summary: Option<Summary>,
+    llm: Option<&AnthropicClient>,
+) -> Vec<Entry> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if threads <= 1 || pairs.len() <= 1 {
+        return pairs
+            .into_iter()
+            .map(|pair| diff_pair(pair, options, summary, llm))
+            .collect();
+    }
+    let chunk_len = pairs.len().div_ceil(threads);
+    let mut chunks = Vec::with_capacity(threads);
+    let mut rest = pairs.into_iter().peekable();
+    while rest.peek().is_some() {
+        chunks.push(rest.by_ref().take(chunk_len).collect::<Vec<_>>());
+    }
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .into_iter()
+                        .map(|pair| diff_pair(pair, options, summary, llm))
+                        .collect::<Vec<Entry>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("a diff thread panicked"))
+            .collect()
+    })
+}
+
 /// Diffs one pair. `llm` is only read when `summary` is [`Summary::Llm`].
 pub fn diff_pair(
     pair: Pair,
@@ -75,14 +115,20 @@ pub fn diff_pair(
             Ok(diff) => {
                 let mut report =
                     Report::from_diff(&diff, &pair.old_name, &pair.new_name, options.engine.name());
-                report.summaries = match summary {
-                    None => Vec::new(),
-                    Some(Summary::Rules) => rules::summarize(&diff),
+                match summary {
+                    None => {}
+                    Some(Summary::Rules) => {
+                        report.summaries = rules::summarize(&diff);
+                        report.summary_source = Some("rules");
+                    }
                     Some(Summary::Llm) => {
                         let client = llm.map(|c| c as &dyn LlmClient);
-                        llm::summarize_with_fallback(client, &diff, &report).lines
+                        let found = llm::summarize_with_fallback(client, &diff, &report);
+                        report.summaries = found.lines;
+                        report.summary_source = Some(found.source.name());
+                        report.summary_fallback = found.fallback;
                     }
-                };
+                }
                 Outcome::Diffed {
                     changed: !diff.ops.is_empty(),
                     report,
