@@ -23,7 +23,7 @@ clap_complete = "4"
 clap_mangen = "0.3"
 serde.workspace = true
 serde_json.workspace = true
-toml = "0.8"
+toml = "1.2"
 ignore = "0.4"
 globset = "0.4"
 
